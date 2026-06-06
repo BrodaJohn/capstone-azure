@@ -1,0 +1,64 @@
+name: CI/CD Pipeline - Azure
+
+on:
+  push:
+    branches: [ main ]
+
+env:
+  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/capstone-app
+
+jobs:
+  build-and-push:
+    name: Build & Push Docker Image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build Docker Image
+        run: docker build -t $IMAGE_NAME:${{ github.sha }} -t $IMAGE_NAME:latest .
+
+      - name: Push Docker Image
+        run: |
+          docker push $IMAGE_NAME:${{ github.sha }}
+          docker push $IMAGE_NAME:latest
+
+  deploy:
+    name: Deploy to Azure VM
+    runs-on: ubuntu-latest
+    needs: build-and-push
+
+    steps:
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.AZURE_VM_IP }} >> ~/.ssh/known_hosts
+
+      - name: Deploy Container on Azure VM
+        run: |
+          ssh ${{ secrets.AZURE_VM_USER }}@${{ secrets.AZURE_VM_IP }} "
+            docker pull ${{ env.IMAGE_NAME }}:latest
+            docker stop capstone-app 2>/dev/null || true
+            docker rm   capstone-app 2>/dev/null || true
+            docker run -d \
+              --name capstone-app \
+              --restart unless-stopped \
+              -p 3000:3000 \
+              ${{ env.IMAGE_NAME }}:latest
+            docker image prune -f
+          "
+
+      - name: Verify Deployment
+        run: |
+          sleep 10
+          curl -f http://${{ secrets.AZURE_VM_IP }}/health || exit 1
+          echo 'Deployment successful!'
